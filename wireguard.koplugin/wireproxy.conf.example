@@ -12,7 +12,8 @@ DNS = 192.168.1.1
 
 [Peer]
 PublicKey = REPLACE_WITH_SERVER_PUBLIC_KEY
-# Hostname is resolved each time the tunnel starts (every Wi-Fi reconnect).
+# Hostname is resolved when the tunnel starts; use Restart tunnel if your
+# home IP changes while it is on.
 Endpoint = home.example.com:51820
 AllowedIPs = 192.168.1.0/24
 PersistentKeepalive = 25

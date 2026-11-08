@@ -13,8 +13,6 @@ are tunnelled to hosts on the remote network; the config file decides which.
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
 local InfoMessage = require("ui/widget/infomessage")
-local InputDialog = require("ui/widget/inputdialog")
-local NetworkMgr = require("ui/network/manager")
 local Notification = require("ui/widget/notification")
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
@@ -27,15 +25,9 @@ local T = require("ffi/util").template
 local PID_FILE = "/tmp/koreader-wireguard.pid"
 local LOG_FILE = "/tmp/koreader-wireguard.log"
 -- wireproxy's health endpoint (/metrics, /readyz); loopback only.
-local INFO_ADDR = "127.0.0.1:61820"
+local INFO_HOST, INFO_PORT = "127.0.0.1", 61820
+local INFO_ADDR = INFO_HOST .. ":" .. INFO_PORT
 local SETTINGS_KEY = "wireguard"
-
--- Module-level state survives the plugin being re-instantiated when
--- switching between the file manager and the reader.
-local runtime = {
-    -- The user started the tunnel by hand; bring it back after Wi-Fi drops.
-    wanted = false,
-}
 
 local function shellQuote(s)
     return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
@@ -75,35 +67,17 @@ local function tailLines(s, n)
     return table.concat(lines, "\n", first)
 end
 
-local function splitHostPort(s)
-    if type(s) ~= "string" then return nil end
-    local host, port = s:match("^%[(.+)%]:(%d+)$") -- [ipv6]:port
-    if not host then host, port = s:match("^([^:]+):(%d+)$") end
-    port = tonumber(port)
-    if host and port and port > 0 and port < 65536 then
-        return host, port
-    end
-end
-
---- Plain TCP helpers; deliberately not socket.http, so that KOReader's
---- global HTTP proxy setting can't reroute loopback or LAN probes.
-local function tcpConnect(host, port, timeout)
+--- Plain TCP, deliberately not socket.http, so that KOReader's global
+--- HTTP proxy setting can't reroute the loopback health check.
+local function httpGetLoopback(path)
     local socket = require("socket")
     local sock = socket.tcp()
-    sock:settimeout(timeout)
-    local ok, err = sock:connect(host, port)
-    if not ok then
+    sock:settimeout(2)
+    if not sock:connect(INFO_HOST, INFO_PORT) then
         sock:close()
-        return nil, err
+        return nil
     end
-    return sock
-end
-
-local function httpGetLoopback(addr, path)
-    local host, port = splitHostPort(addr)
-    local sock = host and tcpConnect(host, port, 2)
-    if not sock then return nil end
-    sock:send("GET " .. path .. " HTTP/1.0\r\nHost: " .. addr .. "\r\n\r\n")
+    sock:send("GET " .. path .. " HTTP/1.0\r\nHost: " .. INFO_ADDR .. "\r\n\r\n")
     local body = sock:receive("*a")
     sock:close()
     return body and body:match("\r\n\r\n(.*)$")
@@ -144,22 +118,10 @@ function WireGuard:init()
 
     self.ui.menu:registerToMainMenu(self)
     self:onDispatcherRegisterActions()
-
-    self._reconcile = function() self:reconcile(true) end
-
-    -- KOReader may start with Wi-Fi already up, in which case no
-    -- NetworkConnected event follows; start without restarting.
-    if self:wantsAutoRun() and not self:isRunning() and NetworkMgr:isConnected() then
-        UIManager:nextTick(function() self:reconcile(false) end)
-    end
 end
 
 function WireGuard:saveSettings()
     G_reader_settings:saveSetting(SETTINGS_KEY, self.settings)
-end
-
-function WireGuard:wantsAutoRun()
-    return self.settings.autostart or runtime.wanted
 end
 
 function WireGuard:isInstalled()
@@ -230,65 +192,17 @@ function WireGuard:stop(quiet)
     if not quiet then Notification:notify(_("WireGuard tunnel stopped.")) end
 end
 
---- True when the configured home host answers directly, i.e. we are on
---- the home network and the tunnel isn't needed.
-function WireGuard:isAtHome()
-    local host, port = splitHostPort(self.settings.home_probe)
-    if not host then return false end
-    local sock = tcpConnect(host, port, 1.5)
-    if sock then
-        sock:close()
-        return true
-    end
-    return false
-end
-
---- Bring the tunnel to the state the settings ask for.
---- @param restart boolean restart a running tunnel, so the endpoint
----                hostname is resolved again on the new network
-function WireGuard:reconcile(restart)
-    if not self:wantsAutoRun() then return end
-    if self.settings.skip_at_home and self:isAtHome() then
-        if self:isRunning() then self:stop(true) end
-        logger.info("WireGuard: home network detected, tunnel not started")
-        Notification:notify(_("Home network: WireGuard not needed."))
-        return
-    end
-    if self:isRunning() then
-        if not restart then return end
-        self:stop(true)
-    end
-    self:start(not runtime.wanted and not self.settings.notify_autostart)
-end
-
-function WireGuard:onNetworkConnected()
-    if not self:wantsAutoRun() then return end
-    -- Debounce, and let other NetworkConnected handlers run first.
-    UIManager:unschedule(self._reconcile)
-    UIManager:scheduleIn(2, self._reconcile)
-end
-
-function WireGuard:onNetworkDisconnected()
-    UIManager:unschedule(self._reconcile)
-    if self:isRunning() then self:stop(true) end
-end
-
-function WireGuard:onCloseWidget()
-    UIManager:unschedule(self._reconcile)
-end
-
 function WireGuard:onToggleWireGuard()
     if self:isRunning() then
-        runtime.wanted = false
         self:stop()
     else
-        runtime.wanted = self:start()
+        self:start()
     end
 end
 
 function WireGuard:onRestartWireGuard()
     if self:isRunning() then self:stop(true) end
-    runtime.wanted = self:start()
+    self:start()
 end
 
 function WireGuard:showStatus()
@@ -297,7 +211,7 @@ function WireGuard:showStatus()
         table.insert(lines, _("Tunnel: stopped"))
     else
         table.insert(lines, _("Tunnel: running"))
-        local peers = parsePeers(httpGetLoopback(INFO_ADDR, "/metrics"))
+        local peers = parsePeers(httpGetLoopback("/metrics"))
         if #peers == 0 then
             table.insert(lines, _("No peer information available."))
         end
@@ -315,10 +229,6 @@ function WireGuard:showStatus()
                 formatBytes(peer.rx_bytes), formatBytes(peer.tx_bytes)))
         end
     end
-    if self.settings.skip_at_home and self.settings.home_probe then
-        table.insert(lines, "")
-        table.insert(lines, self:isAtHome() and _("Home network: yes") or _("Home network: no"))
-    end
     UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
 end
 
@@ -327,40 +237,6 @@ function WireGuard:showLog()
         title = _("WireGuard log"),
         text = self:readLog(200) ~= "" and self:readLog(200) or _("The log is empty."),
     })
-end
-
-function WireGuard:showHomeProbeDialog(touchmenu_instance)
-    local dialog
-    dialog = InputDialog:new{
-        title = _("Home network check"),
-        description = _("A host:port that only answers on your home network, e.g. your server's LAN address 192.168.1.10:8000. When it answers, the tunnel is not started."),
-        input = self.settings.home_probe or "",
-        input_hint = "192.168.1.10:8000",
-        buttons = {{
-            {
-                text = _("Cancel"),
-                id = "close",
-                callback = function() UIManager:close(dialog) end,
-            },
-            {
-                text = _("Save"),
-                is_enter_default = true,
-                callback = function()
-                    local value = util.trim(dialog:getInputText())
-                    if value ~= "" and not splitHostPort(value) then
-                        UIManager:show(InfoMessage:new{ text = _("Use the form host:port.") })
-                        return
-                    end
-                    self.settings.home_probe = value ~= "" and value or nil
-                    self:saveSettings()
-                    UIManager:close(dialog)
-                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                end,
-            },
-        }},
-    }
-    UIManager:show(dialog)
-    dialog:onShowKeyboard()
 end
 
 function WireGuard:toggleSetting(key)
@@ -399,32 +275,6 @@ function WireGuard:addToMainMenu(menu_items)
                 text = _("Status"),
                 keep_menu_open = true,
                 callback = function() self:showStatus() end,
-                separator = true,
-            },
-            {
-                text = _("Start when Wi-Fi connects"),
-                help_text = _("Start the tunnel whenever Wi-Fi connects, and restart it on every reconnect so the endpoint is looked up again on the new network."),
-                checked_func = function() return self.settings.autostart end,
-                callback = function() self:toggleSetting("autostart") end,
-            },
-            {
-                text = _("Notify when started automatically"),
-                enabled_func = function() return self.settings.autostart end,
-                checked_func = function() return self.settings.notify_autostart end,
-                callback = function() self:toggleSetting("notify_autostart") end,
-            },
-            {
-                text = _("Skip on home network"),
-                help_text = _("Before starting the tunnel automatically, check whether the home host answers directly. If it does, you're at home and the tunnel is not started."),
-                checked_func = function() return self.settings.skip_at_home end,
-                callback = function() self:toggleSetting("skip_at_home") end,
-            },
-            {
-                text_func = function()
-                    return T(_("Home network check: %1"), self.settings.home_probe or _("not set"))
-                end,
-                keep_menu_open = true,
-                callback = function(touchmenu_instance) self:showHomeProbeDialog(touchmenu_instance) end,
                 separator = true,
             },
             {

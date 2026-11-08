@@ -20,22 +20,16 @@ sh(string.format("mkdir -p %s/bin %s/settings && cp %s/wireguard.koplugin/*.lua 
 
 -- ---------------------------------------------------------------- stubs
 local shown, notified, scheduled, actions = {}, {}, {}, {}
-local net_connected = false
 
 local function stub(name, value) package.loaded[name] = value end
-local widget_methods = { onShowKeyboard = function() end, getInputText = function() return "" end }
-local function newable()
-    return { new = function(_, o) return setmetatable(o, { __index = widget_methods }) end }
-end
+local function newable() return { new = function(_, o) return o end } end
 
 stub("gettext", function(s) return s end)
 stub("logger", { dbg = function() end, info = function() end, warn = function() end })
 stub("datastorage", { getSettingsDir = function() return TMP .. "/settings" end })
 stub("dispatcher", { registerAction = function(_, name, v) actions[name] = v end })
 stub("ui/widget/infomessage", newable())
-stub("ui/widget/inputdialog", newable())
 stub("ui/widget/textviewer", newable())
-stub("ui/network/manager", { isConnected = function() return net_connected end })
 stub("ui/widget/notification", { notify = function(_, text) table.insert(notified, text) end })
 stub("ffi/util", { template = function(s, ...)
     local args = { ... }
@@ -71,12 +65,6 @@ _G.G_reader_settings = {
     readSetting = function(_, k) return saved[k] end,
     saveSetting = function(_, k, v) saved[k] = v end,
 }
-
-local function runScheduled()
-    local fns = scheduled
-    scheduled = {}
-    for _, fn in ipairs(fns) do fn() end
-end
 
 -- ---------------------------------------------------------------- helpers
 local failed = 0
@@ -140,7 +128,7 @@ local menu = {}
 wg:addToMainMenu(menu)
 check(menu.wireguard and menu.wireguard.sorting_hint == "network", "menu sits in the network tab")
 check(not wg:isRunning(), "not running initially")
-check(#scheduled == 0, "no autostart when disabled")
+check(#scheduled == 0, "does not start on init")
 
 clear()
 wg:onToggleWireGuard()
@@ -157,55 +145,21 @@ wg:showStatus()
 local status = last(shown) and last(shown).text or ""
 check(status:find("Tunnel: running", 1, true) and status:find("Peer 1: 127.0.0.1:", 1, true), "status shows the peer endpoint")
 
-wg:onNetworkDisconnected()
-check(not wg:isRunning(), "stops when Wi-Fi disconnects")
-wg:onNetworkConnected()
-check(#scheduled == 1, "a manually started tunnel is scheduled to come back")
-wg:onNetworkConnected()
-check(#scheduled == 1, "repeated NetworkConnected is debounced")
-runScheduled()
-check(wg:isRunning(), "comes back after reconnect")
-
+wg:onRestartWireGuard()
 local old_pid = sh("cat /tmp/koreader-wireguard.pid")
-wg:onNetworkConnected()
-runScheduled()
-check(wg:isRunning() and sh("cat /tmp/koreader-wireguard.pid") ~= old_pid, "reconnect restarts a running tunnel")
-
-wg:onToggleWireGuard()
-check(not wg:isRunning(), "toggle stops the tunnel")
-wg:onNetworkConnected()
-check(#scheduled == 0, "a stopped tunnel stays stopped on reconnect")
-
--- Autostart with home detection.
-wg:toggleSetting("autostart")
-wg:toggleSetting("skip_at_home")
-check(saved.wireguard.autostart and saved.wireguard.skip_at_home, "settings are persisted")
-local home = socket.bind("127.0.0.1", 0)
-local _, home_port = home:getsockname()
-wg.settings.home_probe = "127.0.0.1:" .. home_port
-clear()
-wg:onNetworkConnected()
-runScheduled()
-check(not wg:isRunning() and last(notified) == "Home network: WireGuard not needed.", "skips the tunnel at home")
-home:close()
-
-wg.settings.home_probe = "127.0.0.1:" .. freePort()
-clear()
-wg:onNetworkConnected()
-runScheduled()
-check(wg:isRunning(), "starts the tunnel away from home")
-check(#notified == 0, "autostart is silent by default")
+check(wg:isRunning(), "restart keeps the tunnel running")
 
 -- A new instance (file manager <-> reader switch) adopts the running tunnel.
-net_connected = true
 local wg2 = WireGuard:new{ ui = ui }
-check(wg2:isRunning() and #scheduled == 0, "new instance adopts the running tunnel")
-wg2:stop(true)
+check(wg2:isRunning() and sh("cat /tmp/koreader-wireguard.pid") == old_pid, "new instance adopts the running tunnel")
+
+wg2:onToggleWireGuard()
+check(not wg2:isRunning(), "toggle stops the tunnel")
+check(last(notified) == "WireGuard tunnel stopped.", "stop is notified")
+
+-- Purely manual: nothing starts it behind the user's back.
 WireGuard:new{ ui = ui }
-check(#scheduled == 1, "autostart on init when Wi-Fi is already up")
-runScheduled()
-check(wg2:isRunning(), "init autostart starts the tunnel")
-wg2:stop(true)
+check(not wg2:isRunning() and #scheduled == 0, "never starts on its own")
 
 writeConfig("not-a-key")
 clear()
@@ -220,7 +174,7 @@ for _, item in ipairs(menu.wireguard.sub_item_table) do
         if item[f] and not pcall(item[f]) then errors = errors + 1 end
     end
 end
-for _, idx in ipairs({ 3, 7, 9, 10 }) do -- status, home dialog, log, help
+for _, idx in ipairs({ 3, 5, 6 }) do -- status, log, help
     if not pcall(menu.wireguard.sub_item_table[idx].callback, tm) then errors = errors + 1 end
 end
 check(errors == 0, "menu entries render and open")

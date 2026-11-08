@@ -52,9 +52,8 @@ Some routers drop public DNS answers that point to `127.0.0.1` ("DNS
 rebinding protection": OpenWrt, Fritz!Box, some hotel networks). On those
 networks the away case fails. Mobile hotspots are usually fine.
 
-Turn on **Skip on home network** and set **Home network check** to the
-server's LAN `host:port`. When it answers directly, the tunnel isn't
-started, which saves battery.
+At home you can leave the tunnel off: the hostname already points at the
+LAN.
 
 ### Don't use KOReader's HTTP proxy setting with wireproxy
 
@@ -64,19 +63,18 @@ CONNECT requests and rejects POST. Sync plugins POST, so use the
 
 ## Behaviour
 
-- **Start when Wi-Fi connects**: starts the tunnel on every Wi-Fi connect
-  and restarts it on reconnect, so the endpoint hostname is looked up again
-  on the new network. A tunnel you start by hand also comes back after
-  Wi-Fi drops, until you stop it.
-- Stops when Wi-Fi disconnects. A watchdog stops it within about 15 s after
-  KOReader exits or crashes.
+- The tunnel is **manual**. Turn it on and off under **Network → WireGuard**
+  (long-press the entry for a quick toggle), or bind **Toggle WireGuard
+  tunnel** to a gesture. It never starts by itself.
+- Once on, it stays up across Wi-Fi drops, because WireGuard reconnects on
+  its own. If your home IP changed, or the endpoint should resolve
+  differently on the new network, use **Restart tunnel**.
+- A watchdog stops it within about 15 s after KOReader exits or crashes.
 - **Status** shows each peer's endpoint, last handshake and traffic, from
   wireproxy's health endpoint on `127.0.0.1:61820`. Don't use that port in
   your config.
 - **Show log** opens `/tmp/koreader-wireguard.log`. Turn on **Verbose log**
   to see handshakes.
-- Gestures and profiles get **Toggle WireGuard tunnel** and **Restart
-  WireGuard tunnel** actions.
 
 The private key sits in plain text in KOReader's settings folder. Give the
 reader its own peer, so you can revoke it if the device is lost.
