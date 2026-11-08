@@ -1,0 +1,32 @@
+# wireproxy config for the KOReader WireGuard plugin.
+# Copy to koreader/settings/wireguard/wireproxy.conf and fill in the keys.
+# Full reference: https://github.com/windtf/wireproxy#configuration
+
+[Interface]
+# The e-reader's own key pair. Give it a dedicated peer on your server so
+# you can revoke it if the device is lost; the key is stored in plain text.
+PrivateKey = REPLACE_WITH_READER_PRIVATE_KEY
+Address = 10.8.0.5/32
+# DNS server used for hostnames in Target lines below (reached over the tunnel).
+DNS = 192.168.1.1
+
+[Peer]
+PublicKey = REPLACE_WITH_SERVER_PUBLIC_KEY
+# Hostname is resolved each time the tunnel starts (every Wi-Fi reconnect).
+Endpoint = home.example.com:51820
+AllowedIPs = 192.168.1.0/24
+PersistentKeepalive = 25
+
+# Each tunnel listens on the reader's loopback and forwards over WireGuard.
+# Use the SAME port as the service has at home: then one hostname that
+# resolves to 127.0.0.1 publicly and to the LAN IP at home works everywhere.
+
+# Crossbill
+[TCPClientTunnel]
+BindAddress = 127.0.0.1:8000
+Target = 192.168.1.10:8000
+
+# OPDS catalogue (e.g. Calibre content server)
+[TCPClientTunnel]
+BindAddress = 127.0.0.1:8083
+Target = 192.168.1.10:8083
